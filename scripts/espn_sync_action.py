@@ -78,7 +78,10 @@ def main():
     # ---- knockout: derive who actually reached each phase (ESPN = source of truth) ----
     real_teams = set(teams.keys())
     ko_sets = {k: set() for k in KO_POINTS}   # R32,R16,QF,SF,final,third,champion
-    ko_live = []  # in-progress KO games (for the live chip)
+    ko_live = []          # in-progress KO games (for the live chip)
+    eliminated = set()    # teams knocked out of the tournament
+    last_ko = None        # most recent FINISHED KO game (for the status chip)
+    LIVE_ST = ("STATUS_IN_PROGRESS","STATUS_FIRST_HALF","STATUS_SECOND_HALF","STATUS_HALFTIME")
     for e in data.get("events", []):
         slug = e.get("season", {}).get("slug", "")
         ph = PHASE_SLUG.get(slug)
@@ -98,18 +101,34 @@ def main():
             if s["real"] and reached_key and reached_key != "3rd":
                 ko_sets[reached_key].add(s["es"])
         done = st in ("STATUS_FULL_TIME", "STATUS_FINAL_PEN")
-        if ph == "final" and done:
-            w = next((s["es"] for s in sides if s["real"] and s["winner"]), None)
-            if w: ko_sets["champion"].add(w)
-        if ph == "3rd" and done:
-            w = next((s["es"] for s in sides if s["real"] and s["winner"]), None)
-            if w: ko_sets["third"].add(w)
-        # collect live KO games for the chip
-        if st in ("STATUS_IN_PROGRESS","STATUS_FIRST_HALF","STATUS_SECOND_HALF","STATUS_HALFTIME"):
+        if done:
+            if ph == "final":
+                w = next((s["es"] for s in sides if s["real"] and s["winner"]), None)
+                if w: ko_sets["champion"].add(w)
+            if ph == "3rd":
+                w = next((s["es"] for s in sides if s["real"] and s["winner"]), None)
+                if w: ko_sets["third"].add(w)
+            # loser of a finished KO match is eliminated
+            for s in sides:
+                if s["real"] and s["winner"] is False:
+                    eliminated.add(s["es"])
+            # track most recent finished KO game for the chip
             if all(s["real"] for s in sides) and len(sides)==2:
                 h=next(s for s in sides if s["homeAway"]=="home"); a=next(s for s in sides if s["homeAway"]=="away")
-                try: ko_live.append({"home":h["es"],"away":a["es"],"hs":int(h["score"]),"as":int(a["score"])})
+                try:
+                    cand={"home":h["es"],"away":a["es"],"hs":int(h["score"]),"as":int(a["score"]),
+                          "ph":ph,"pen":(st=="STATUS_FINAL_PEN"),"date":e.get("date","")}
+                    if last_ko is None or cand["date"]>last_ko["date"]:
+                        last_ko=cand
                 except: pass
+        # collect live KO games for the chip
+        if st in LIVE_ST and all(s["real"] for s in sides) and len(sides)==2:
+            h=next(s for s in sides if s["homeAway"]=="home"); a=next(s for s in sides if s["homeAway"]=="away")
+            try: ko_live.append({"home":h["es"],"away":a["es"],"hs":int(h["score"]),"as":int(a["score"]),"ph":ph})
+            except: pass
+    # group non-qualifiers are eliminated once the 32-team R32 field is set
+    if len(ko_sets["R32"]) >= 32:
+        eliminated |= (real_teams - ko_sets["R32"])
     actual_ko = {k: sorted(v) for k, v in ko_sets.items()}
 
     # group standings
@@ -170,9 +189,10 @@ def main():
     now=datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=-6)))
     ko_done=sum(1 for k in ("R32","R16","QF","SF","final") for _ in actual_ko.get(k,[]))
     out={"fxDyn":fx_dyn,"standings":standings,"detail":detail,"groups":group_standings(),
-         "actualKo":actual_ko,
+         "actualKo":actual_ko,"eliminated":sorted(eliminated),
          "meta":{"finished":finished,"liveCount":len(live_list),"live":live_list,
-                 "koLive":ko_live,"koReached":{k:len(actual_ko.get(k,[])) for k in KO_POINTS},
+                 "koLive":ko_live,"lastKo":last_ko,
+                 "koReached":{k:len(actual_ko.get(k,[])) for k in KO_POINTS},
                  "updatedTs":now.strftime("%d/%m/%Y %H:%M"),"updatedISO":now.isoformat()}}
     json.dump(out, open(os.path.join(ROOT,"data.json"),"w"), ensure_ascii=False)
     print(f"wrote data.json: finished={finished} live={len(live_list)} leader={standings[0]['name']} ({standings[0]['total']})")
