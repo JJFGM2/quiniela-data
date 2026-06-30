@@ -35,6 +35,16 @@ def match_points(pred, actual):
     ph,pa=pred; ah,aa=actual
     if sign(ph-pa)!=sign(ah-aa): return 0
     return max(0, 10-(abs(ph-ah)+abs(pa-aa)))
+def score_ko(kp, actual_sets):
+    total=0; detail={}
+    for phase,pts in KO_POINTS.items():
+        hit=len(set(kp.get(phase,[])) & actual_sets.get(phase,set()))
+        detail[phase]=hit*pts; total+=hit*pts
+    return total, detail
+
+# ESPN season.slug -> our KO phase key
+PHASE_SLUG = {"round-of-32":"R32","round-of-16":"R16","quarterfinals":"QF",
+              "semifinals":"SF","final":"final","3rd-place-match":"3rd"}
 
 def fetch_espn():
     url=("https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/"
@@ -64,6 +74,43 @@ def main():
         elif st in ("STATUS_IN_PROGRESS","STATUS_FIRST_HALF","STATUS_SECOND_HALF","STATUS_HALFTIME"):
             if f.get("status")!="final":
                 f["home_score"],f["away_score"],f["status"]=hs,as_,"live"
+
+    # ---- knockout: derive who actually reached each phase (ESPN = source of truth) ----
+    real_teams = set(teams.keys())
+    ko_sets = {k: set() for k in KO_POINTS}   # R32,R16,QF,SF,final,third,champion
+    ko_live = []  # in-progress KO games (for the live chip)
+    for e in data.get("events", []):
+        slug = e.get("season", {}).get("slug", "")
+        ph = PHASE_SLUG.get(slug)
+        if not ph:
+            continue
+        comp = e["competitions"][0]; st = comp["status"]["type"]["name"]
+        cs = comp["competitors"]
+        # map ESPN names -> our Spanish names; keep only resolved (real) teams
+        sides = []
+        for t in cs:
+            disp = t["team"]["displayName"]
+            es = ESPN_TO_ES.get(disp, disp)
+            sides.append({"es": es, "real": es in real_teams, "winner": t.get("winner"),
+                          "score": t.get("score"), "homeAway": t.get("homeAway")})
+        reached_key = ph if ph in ko_sets else None  # R32/R16/QF/SF/final
+        for s in sides:
+            if s["real"] and reached_key and reached_key != "3rd":
+                ko_sets[reached_key].add(s["es"])
+        done = st in ("STATUS_FULL_TIME", "STATUS_FINAL_PEN")
+        if ph == "final" and done:
+            w = next((s["es"] for s in sides if s["real"] and s["winner"]), None)
+            if w: ko_sets["champion"].add(w)
+        if ph == "3rd" and done:
+            w = next((s["es"] for s in sides if s["real"] and s["winner"]), None)
+            if w: ko_sets["third"].add(w)
+        # collect live KO games for the chip
+        if st in ("STATUS_IN_PROGRESS","STATUS_FIRST_HALF","STATUS_SECOND_HALF","STATUS_HALFTIME"):
+            if all(s["real"] for s in sides) and len(sides)==2:
+                h=next(s for s in sides if s["homeAway"]=="home"); a=next(s for s in sides if s["homeAway"]=="away")
+                try: ko_live.append({"home":h["es"],"away":a["es"],"hs":int(h["score"]),"as":int(a["score"])})
+                except: pass
+    actual_ko = {k: sorted(v) for k, v in ko_sets.items()}
 
     # group standings
     def group_standings():
@@ -99,9 +146,10 @@ def main():
                 pts=match_points((pred[0],pred[1]),(f["home_score"],f["away_score"]))
                 gtot+=pts; gdet[int(k)]=pts
                 if pts==10: exact+=1
-        standings.append({"id":p["id"],"name":p["name"],"g":gtot,"k":0,"total":gtot,
+        ktot,kdet=score_ko(kpred.get(pid,{}),ko_sets)
+        standings.append({"id":p["id"],"name":p["name"],"g":gtot,"k":ktot,"total":gtot+ktot,
                           "played":len(gdet),"exact":exact})
-        detail[p["id"]]={"group":gdet,"groupPts":gtot,"koPts":0,"total":gtot,"exact":exact,"koDetail":{}}
+        detail[p["id"]]={"group":gdet,"groupPts":gtot,"koPts":ktot,"total":gtot+ktot,"exact":exact,"koDetail":kdet}
     standings.sort(key=lambda r:(-r["total"],-r["exact"],r["name"]))
     rank=0; prev=None
     for i,r in enumerate(standings):
@@ -120,11 +168,15 @@ def main():
                                   "hs":f["home_score"],"as":f["away_score"]})
     finished=sum(1 for f in fixtures if f.get("status")=="final")
     now=datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=-6)))
+    ko_done=sum(1 for k in ("R32","R16","QF","SF","final") for _ in actual_ko.get(k,[]))
     out={"fxDyn":fx_dyn,"standings":standings,"detail":detail,"groups":group_standings(),
+         "actualKo":actual_ko,
          "meta":{"finished":finished,"liveCount":len(live_list),"live":live_list,
+                 "koLive":ko_live,"koReached":{k:len(actual_ko.get(k,[])) for k in KO_POINTS},
                  "updatedTs":now.strftime("%d/%m/%Y %H:%M"),"updatedISO":now.isoformat()}}
     json.dump(out, open(os.path.join(ROOT,"data.json"),"w"), ensure_ascii=False)
     print(f"wrote data.json: finished={finished} live={len(live_list)} leader={standings[0]['name']} ({standings[0]['total']})")
+    print("KO reached:", {k:len(actual_ko.get(k,[])) for k in KO_POINTS})
 
 if __name__=="__main__":
     main()
