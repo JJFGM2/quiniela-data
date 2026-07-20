@@ -45,6 +45,8 @@ def score_ko(kp, actual_sets):
 # ESPN season.slug -> our KO phase key
 PHASE_SLUG = {"round-of-32":"R32","round-of-16":"R16","quarterfinals":"QF",
               "semifinals":"SF","final":"final","3rd-place-match":"3rd"}
+# ESPN "finished" statuses — includes regulation, extra time (AET), and penalties
+FINAL_ST = ("STATUS_FULL_TIME","STATUS_FINAL","STATUS_FINAL_AET","STATUS_FINAL_PEN")
 
 def fetch_espn():
     url=("https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/"
@@ -69,7 +71,7 @@ def main():
         f=by_teams.get((eh,ea)) or by_teams.get((ea,eh))
         if not f: continue
         if eh==f["away"]: hs,as_=as_,hs
-        if st=="STATUS_FULL_TIME":
+        if st in FINAL_ST:
             f["home_score"],f["away_score"],f["status"]=hs,as_,"final"
         elif st in ("STATUS_IN_PROGRESS","STATUS_FIRST_HALF","STATUS_SECOND_HALF","STATUS_HALFTIME"):
             if f.get("status")!="final":
@@ -100,7 +102,7 @@ def main():
         for s in sides:
             if s["real"] and reached_key and reached_key != "3rd":
                 ko_sets[reached_key].add(s["es"])
-        done = st in ("STATUS_FULL_TIME", "STATUS_FINAL_PEN")
+        done = st in FINAL_ST
         if done:
             if ph == "final":
                 w = next((s["es"] for s in sides if s["real"] and s["winner"]), None)
